@@ -1,0 +1,241 @@
+clc; clear; close all
+
+%% 1. 기본 경로 및 날짜 폴더 설정
+baseDir    = 'G:\공유 드라이브\BSL_Data2\한전_김제ESS';
+kimjFolder = '202206_KIMJ';
+basePath   = fullfile(baseDir, kimjFolder);
+
+allItems    = dir(basePath);
+folderNames = {allItems([allItems.isdir]).name};
+
+% 날짜 형식의 폴더만 선택 (예: '20210615' 형식)
+isDateFolder = cellfun(@(x) ~isempty(regexp(x, '^\d{8}$', 'once')), folderNames);
+dateFolders  = sort(folderNames(isDateFolder));
+
+%% 2. 원하는 기간 선택
+weekStart = '20220623';
+weekEnd   = '20220623';
+
+weekFolders = dateFolders(cellfun(@(x) (str2double(x) >= str2double(weekStart)) && ...
+                                       (str2double(x) <= str2double(weekEnd)), dateFolders));
+fprintf('선택된 기간 폴더:\n');
+disp(weekFolders);
+
+filePatternTemplate = 'JXR_BSC_Section_%s*.csv';
+n_hd = 2;
+
+%% 3. 각 날짜 폴더 내 파일 처리 및 데이터 누적
+T_group = table();
+for i = 1:length(weekFolders) % weekfolders 에 여러날짜가 들어가기 위한 for문
+    currDate   = weekFolders{i};
+    data_folder = fullfile(baseDir, kimjFolder, currDate);
+    filePattern = fullfile(data_folder, sprintf(filePatternTemplate, currDate));
+    fileList    = dir(filePattern);
+    
+    for j = 1:length(fileList) % 이 부분은 BSC 파일이 8시간 주기로 3파일로 나눠져있기 때문에 BSC_0,1,2 를 반복문으로 처리하기 위해 넣었음
+        fullPath = fullfile(fileList(j).folder, fileList(j).name);
+        
+        % 데이터 읽기
+        previewData = readcell(fullPath, 'Range', 'A1:ZZ5');
+        headerLine = string(previewData(4, :));
+        onlineCols = find(contains(headerLine, "[Online]"));
+        totalCols  = find(contains(headerLine, "[Total]"));
+        variableNames = matlab.lang.makeUniqueStrings(matlab.lang.makeValidName(cellstr(string(previewData(5, :)))));
+        
+        % 전체 데이터 읽기 (헤더 제외)
+        fullDataAll = readtable(fullPath, 'FileType', 'text', 'ReadVariableNames', false, 'TextType','char');
+        fullData = fullDataAll(n_hd+1:end, :);
+        fullData.Properties.VariableNames = variableNames;
+        
+        % 온라인/Total 데이터 저장 (개별 CSV 저장은 생략)
+        % 그룹 데이터로 누적
+        T_group = vertcat(T_group, fullData);
+    end
+end
+
+%% 4. Time 열 datetime 변환
+T_group.Time = datetime(T_group.Time, 'InputFormat', 'yyyy-MM-dd HH:mm');
+
+
+%% 배터리 용량 계산 (팩 전류 기준)
+cellCapacity   = 64;              % 셀 용량 (Ah)
+moduleCapacity = cellCapacity * 2;  % 모듈 용량: 2P → 128 Ah
+% 랙은 17모듈 직렬이므로 용량은 moduleCapacity와 동일합니다.
+% 전체 팩은 8개의 랙이 병렬 → 팩 용량 = moduleCapacity * 8
+packCapacity   = moduleCapacity * 8; % 128 * 8 = 1024 Ah
+
+%% 팩 C‑rate 계산 (충전/방전 방향 구분, 절대값 미사용)
+% 팩 전류 T_group.DCCurrent_A_가 음수이면 방전, 양수이면 충전
+C_rate_pack = T_group.DCCurrent_A_ / packCapacity;
+
+%% 팩 C‑rate 그래프 그리기 (세로축: C‑rate, 가로축: 시간)
+figure;
+plot(T_group.Time, C_rate_pack,'Color','[0.3010, 0.7450, 0.9330]','LineWidth',1);
+xlabel('Time');
+ylabel('C‑rate');
+title(sprintf('Time vs C‑rate for %s ~ %s', weekFolders{1}, weekFolders{end}));
+grid on;
+legend('C‑rate', 'Location', 'best');
+
+
+%% 플롯 생성
+% figure;
+% plot(T_group.Time, T_group.("AverageSOC___"), '-r'); % Online
+% hold on;
+% plot(T_group.Time, T_group.("AverageSOC____1"), '--b'); % Total
+% xlabel('Time');
+% ylabel('Average SOC (%)');
+% title(sprintf('Time vs Average SOC(%%) for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% legend('Average SOC online', 'Average SOC total', 'Location', 'best');
+% grid on;
+
+figure;
+plot(T_group.Time, T_group.DCCurrent_A_, 'Color','[0.3010, 0.7450, 0.9330]','LineWidth',1);
+xlabel('Time');
+ylabel('Current');
+title(sprintf('Time vs Current for %s ~ %s', weekFolders{1}, weekFolders{end}));
+legend('DC Current', 'Location', 'best');
+grid on;
+
+% figure;
+% plot(T_group.Time, T_group.("AverageC_V_Sum_V_"), '-r');
+% hold on;
+% plot(T_group.Time, T_group.("AverageC_V_Sum_V__1"), '--b');
+% xlabel('Time');
+% ylabel('AverageC_V_Sum_V');
+% title(sprintf('Time vs AverageC_V_Sum_V for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% legend('AverageC V Sum V', 'AverageC V Sum V total', 'Location', 'best');
+% grid on;
+% 
+% figure;
+% plot(T_group.Time, T_group.("AverageC_V__V_"), '-r');
+% hold on;
+% plot(T_group.Time, T_group.("AverageC_V__V__1"), '--b');
+% xlabel('Time');
+% ylabel('Average cell voltage');
+% title(sprintf('Time vs Average cell voltage for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% legend('Average Cell Voltage - Online', 'Average Cell Voltage - total', 'Location', 'best');
+% grid on;
+% 
+% figure;
+% plot(T_group.Time, T_group.("AverageM_T__oC_"), '-r');
+% hold on;
+% plot(T_group.Time, T_group.("AverageM_T__oC__1"), '--b');
+% xlabel('Time');
+% ylabel('Average cell voltage');
+% title(sprintf('Time vs Average Module Temperature for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% legend('Average Module Temperature - Online', 'Average Module Temperature - total', 'Location', 'best');
+% grid on;
+
+%% Total 만 이용하도록
+
+%% HighestSOC___1 플롯
+% figure;
+% plot(T_group.Time, T_group.HighestSOC____1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);
+% xlabel('Time');
+% ylabel('HighestSOC___1');
+% title(sprintf('Time vs HighestSOC for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% grid on;
+% legend('HighestSOC', 'Location', 'best');
+% 
+% %% LowestSOC___1 플롯
+% figure;
+% plot(T_group.Time, T_group.LowestSOC____1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);
+% xlabel('Time');
+% ylabel('LowestSOC___1');
+% title(sprintf('Time vs LowestSOC for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% grid on;
+% legend('LowestSOC', 'Location', 'best');
+% 
+% %% HighestC_V__V_1 플롯
+% figure;
+% plot(T_group.Time, T_group.HighestC_V__V__1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);
+% xlabel('Time');
+% ylabel('HighestC_V__V_1');
+% title(sprintf('Time vs HighestC_V__V for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% grid on;
+% legend('HighestC_V', 'Location', 'best');
+% 
+% %% LowestC_V__V_1 플롯
+% figure;
+% plot(T_group.Time, T_group.LowestC_V__V__1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);
+% xlabel('Time');
+% ylabel('LowestC_V__V_1');
+% title(sprintf('Time vs LowestC_V__V for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% grid on;
+% legend('LowestC_V', 'Location', 'best');
+% 
+% %% HighestM_T__oC_1 플롯
+% figure;
+% plot(T_group.Time, T_group.HighestM_T__oC__1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);
+% xlabel('Time');
+% ylabel('HighestM_T__oC_1');
+% title(sprintf('Time vs HighestM_T__oC for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% grid on;
+% legend('HighestM_T__oC', 'Location', 'best');
+% 
+% %% LowestM_T__oC_1 플롯
+% figure;
+% plot(T_group.Time, T_group.LowestM_T__oC__1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);
+% xlabel('Time');
+% ylabel('LowestM_T__oC_1');
+% title(sprintf('Time vs LowestM_T__oC for %s ~ %s', weekFolders{1}, weekFolders{end}));
+% grid on;
+% legend('LowestM_T__oC', 'Location', 'best');
+
+
+%% 그래프를 같이 
+
+%% SOC 데이터에 대한 표준편차 계산
+std_HighSOC = std(T_group.HighestSOC____1, 'omitnan');
+std_LowSOC  = std(T_group.LowestSOC____1, 'omitnan');
+
+%% HighestSOC____1, LowestSOC____1 플롯 (SOC)
+figure;
+plot(T_group.Time, T_group.HighestSOC____1, 'r--', 'LineWidth',1.5);  % High: 빨간 점선
+hold on;
+plot(T_group.Time, T_group.LowestSOC____1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);  % Low: 지정 색상, 실선
+xlabel('Time');
+ylabel('SOC');
+title(sprintf(['Time vs SOC for %s ~ %s\n', ...
+               'Std (HighestSOC): %.2f, Std (LowestSOC): %.2f'], ...
+               weekFolders{1}, weekFolders{end}, std_HighSOC, std_LowSOC));
+grid on;
+legend('HighestSOC', 'LowestSOC', 'Location', 'best');
+
+%% Cell Voltage 데이터에 대한 표준편차 계산
+std_HighCV = std(T_group.HighestC_V__V__1, 'omitnan');
+std_LowCV  = std(T_group.LowestC_V__V__1, 'omitnan');
+
+%% HighestC_V__V__1, LowestC_V__V__1 플롯 (Cell Voltage)
+figure;
+plot(T_group.Time, T_group.HighestC_V__V__1, 'r--', 'LineWidth',1.5);  % High: 빨간 점선
+hold on;
+plot(T_group.Time, T_group.LowestC_V__V__1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);  % Low: 지정 색상, 실선
+xlabel('Time');
+ylabel('Cell Voltage');
+title(sprintf(['Time vs Cell Voltage for %s ~ %s\n', ...
+               'Std (HighestCV): %.2f, Std (LowestCV): %.2f'], ...
+               weekFolders{1}, weekFolders{end}, std_HighCV, std_LowCV));
+grid on;
+legend('HighestC_V', 'LowestC_V', 'Location', 'best');
+
+%% Module Temperature 데이터에 대한 표준편차 계산
+std_HighMT = std(T_group.HighestM_T__oC__1, 'omitnan');
+std_LowMT  = std(T_group.LowestM_T__oC__1, 'omitnan');
+
+%% HighestM_T__oC__1, LowestM_T__oC__1 플롯 (Module Temperature)
+figure;
+plot(T_group.Time, T_group.HighestM_T__oC__1, 'r--', 'LineWidth',1.5);  % High: 빨간 점선
+hold on;
+plot(T_group.Time, T_group.LowestM_T__oC__1, 'Color','[0.3010, 0.7450, 0.9330]', 'LineWidth',1.5);  % Low: 지정 색상, 실선
+xlabel('Time');
+ylabel('Module Temperature (°C)');
+title(sprintf(['Time vs Module Temperature for %s ~ %s\n', ...
+               'Std (HighestMT): %.2f, Std (LowestMT): %.2f'], ...
+               weekFolders{1}, weekFolders{end}, std_HighMT, std_LowMT));
+grid on;
+legend('HighestM_T', 'LowestM_T', 'Location', 'best');
+
+
+
